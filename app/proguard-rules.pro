@@ -1,0 +1,3 @@
+-keep class com.clashzerovpn.** { *; }
+-keep class io.github.metacubex.** { *; }
+-keep class com.zerotier.** { *; }

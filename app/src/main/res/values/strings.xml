@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ClashZero VPN</string>
+    <string name="action_connect">连接</string>
+    <string name="action_disconnect">断开</string>
+    <string name="status_disconnected">未连接</string>
+    <string name="status_connecting">连接中...</string>
+    <string name="status_connected">已连接</string>
+    <string name="status_failed">连接失败</string>
+    <string name="menu_settings">设置</string>
+    <string name="menu_import_config">导入配置</string>
+    <string name="menu_zt_networks">ZeroTier 网络</string>
+    <string name="hint_clash_config">Clash 配置文件 (YAML/JSON)</string>
+    <string name="hint_zt_network_id">ZeroTier 网络 ID (16 位)</string>
+    <string name="label_clash_engine">Clash 引擎</string>
+    <string name="label_zt_engine">ZeroTier 引擎</string>
+    <string name="label_traffic">流量统计</string>
+    <string name="vpn_description">ClashZero VPN 同时连接代理与 ZeroTier 内网</string>
+</resources>
