@@ -46,6 +46,11 @@ class ZeroTierEngine : VpnEngine {
         onOutboundPacket?.invoke(packet)
     }
 
+    /** 由 C++ native 层回调：网络状态变化通知（libzt 1.16 事件驱动） */
+    fun onNetworkUpdate() {
+        // 查询网络状态并更新 UI
+    }
+
     private var _networkId: String = ""
     private var _storagePath: String = ""
 

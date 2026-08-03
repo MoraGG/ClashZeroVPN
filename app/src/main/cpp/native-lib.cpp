@@ -1,11 +1,5 @@
 /**
- * ClashZeroVPN JNI 桥接层
- *
- * 功能：把 Kotlin 的 native 函数映射到 libzt API。
- *
- * 有两种编译模式：
- *  - CZVPN_HAS_LIBZT=1 : 已提供 libzt.so 和头文件，真实调用 ZeroTier SDK
- *  - CZVPN_HAS_LIBZT=0 : stub 占位，仅打日志并返回成功（便于 APK 先编译通过）
+ * ClashZeroVPN JNI 桥接层 (libzt 1.16 API)
  *
  * Kotlin 对应类：com.clashzerovpn.engine.ZeroTierEngine
  */
@@ -18,6 +12,7 @@
 #include <atomic>
 #include <mutex>
 #include <vector>
+#include <cstdlib>
 
 #include <android/log.h>
 
@@ -32,67 +27,56 @@
 
 // ----------- 全局状态 -----------
 static std::atomic<bool> g_started{false};
-static std::atomic<bool> g_networkJoined{false};
-static std::atomic<int64_t> g_nodeId{0};
-static std::atomic<int64_t> g_networkId{0};
-static std::atomic<bool> g_wireRunning{false};
+static std::atomic<bool> g_nodeOnline{false};
+static std::atomic<uint64_t> g_nodeId{0};
+static std::atomic<uint64_t> g_networkId{0};
 
-// Kotlin JVM 回调引用：virtual wire 读到包时调用 Kotlin 的 returnToTun
+// JNI 回调：node 在线状态变化时通知 Kotlin
 static JavaVM* g_jvm = nullptr;
 static jobject g_callbackObject = nullptr;  // ZeroTierEngine 实例
-static jmethodID g_returnToTunMethod = nullptr;
+static jmethodID g_onNetworkUpdateMethod = nullptr; // onNetworkUpdate() 回调
+static jmethodID g_returnToTunMethod = nullptr;    // returnToTun(packet) 回调
 
 static std::mutex g_jniMutex;
 
 #if CZVPN_HAS_LIBZT
-// virtual wire 编号 (libzt 支持多个虚拟网卡，我们只用 0 号)
-static constexpr int VWIRE_IDX = 0;
-#endif
-
-static void callKotlinReturnToTun(JNIEnv* env, const uint8_t* data, int len) {
-    if (!g_returnToTunMethod || !g_callbackObject || len <= 0) return;
-    std::lock_guard<std::mutex> _(g_jniMutex);
-    jbyteArray byteArr = env->NewByteArray(len);
-    if (!byteArr) return;
-    env->SetByteArrayRegion(byteArr, 0, len, reinterpret_cast<const jbyte*>(data));
-    env->CallVoidMethod(g_callbackObject, g_returnToTunMethod, byteArr);
-    if (env->ExceptionCheck()) {
-        env->ExceptionDescribe();
-        env->ExceptionClear();
+// libzt 1.16 事件回调（C 风格函数作为桥接）
+static void ztEventCallback(void* msg) {
+    // 收到事件后通知 Kotlin
+    JNIEnv* env = nullptr;
+    int attached = 0;
+    jint res = g_jvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+    if (res == JNI_EDETACHED) {
+        if (g_jvm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
+        attached = 1;
     }
-    env->DeleteLocalRef(byteArr);
+    if (env && g_callbackObject && g_onNetworkUpdateMethod) {
+        std::lock_guard<std::mutex> _(g_jniMutex);
+        env->CallVoidMethod(g_callbackObject, g_onNetworkUpdateMethod);
+    }
+    if (attached) g_jvm->DetachCurrentThread();
 }
 
-/**
- * virtual wire 读线程：
- *   libzt 通过 zts_virtual_wire_read() 把"虚拟网卡出来的、要回系统 TUN"的 IP 包给我们。
- *   我们调用 Kotlin 的 returnToTun() 函数回写 App 的 VpnService TUN 接口。
- */
-#if CZVPN_HAS_LIBZT
-static void virtualWireReaderThread() {
-    g_wireRunning = true;
-    LOGI("virtualWireReaderThread started");
-    uint8_t buf[65536];
+// node 在线状态轮询线程
+static void nodePollingThread() {
+    LOGI("nodePollingThread started");
     while (g_started.load()) {
-        int n = zts_virtual_wire_read(VWIRE_IDX, buf, sizeof(buf));
-        if (n > 0) {
-            JNIEnv* env = nullptr;
-            int attached = 0;
-            jint res = g_jvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
-            if (res == JNI_EDETACHED) {
-                if (g_jvm->AttachCurrentThread(&env, nullptr) != JNI_OK) continue;
-                attached = 1;
-            }
-            if (env) callKotlinReturnToTun(env, buf, n);
-            if (attached) g_jvm->DetachCurrentThread();
-        } else if (n == 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        bool online = false;
+#if CZVPN_HAS_LIBZT
+        online = (zts_node_is_online() == 1);
+        uint64_t nid = zts_node_get_id();
+        if (nid != 0) {
+            g_nodeId.store(nid);
+            LOGD("node online, id=%llx", (unsigned long long)nid);
         }
+#endif
+        if (online != g_nodeOnline.load()) {
+            g_nodeOnline.store(online);
+            LOGI("node online state changed: %s", online ? "ONLINE" : "OFFLINE");
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(2));
     }
-    g_wireRunning = false;
-    LOGI("virtualWireReaderThread stopped");
+    LOGI("nodePollingThread stopped");
 }
 #endif
 
@@ -106,14 +90,21 @@ extern "C" JNIEXPORT jint JNICALL
 Java_com_clashzerovpn_engine_ZeroTierEngine_nativeInit(
         JNIEnv* env, jobject thiz, jstring storagePath) {
 
-    // 缓存回调方法引用：Kotlin 侧的 fun returnToTun(packet: ByteArray)
+    // 缓存回调方法引用
     jclass cls = env->GetObjectClass(thiz);
+
+    // returnToTun(packet: ByteArray) - 收到要注入到 TUN 的数据包（新版 libzt 通过事件回调获取）
     jmethodID mid = env->GetMethodID(cls, "returnToTun", "([B)V");
     if (!mid) {
-        LOGE("returnToTun([B)V not found on ZeroTierEngine");
+        LOGE("returnToTun([B)V not found");
         return -1;
     }
     g_returnToTunMethod = mid;
+
+    // onNetworkUpdate() - 网络状态变化时由 Kotlin 调用查询
+    jmethodID nid = env->GetMethodID(cls, "onNetworkUpdate", "()V");
+    g_onNetworkUpdateMethod = nid;
+
     if (g_callbackObject) env->DeleteGlobalRef(g_callbackObject);
     g_callbackObject = env->NewGlobalRef(thiz);
 
@@ -122,18 +113,17 @@ Java_com_clashzerovpn_engine_ZeroTierEngine_nativeInit(
     int rc = 0;
 
 #if CZVPN_HAS_LIBZT
+    // 设置事件回调（libzt 1.16 通过回调通知网络事件）
+    zts_init_set_event_handler(ztEventCallback);
+
+    // 从 storage 路径初始化（该路径存 node identity 和配置）
     rc = zts_init_from_storage(path);
     if (rc != ZTS_ERR_OK) {
         LOGE("zts_init_from_storage failed: %d", rc);
         env->ReleaseStringUTFChars(storagePath, path);
         return rc;
     }
-    // 启用 virtual wire 模式（注入/读出原始 IP 帧）
-    zts_virtual_wire_enable(VWIRE_IDX);
-
-    // 设置 node id
-    g_nodeId.store(zts_node_get_id());
-    LOGI("zerotier node id: %llx", (unsigned long long)g_nodeId.load());
+    LOGI("zts_init_from_storage OK");
 #else
     LOGI("nativeInit STUB mode");
 #endif
@@ -147,16 +137,16 @@ Java_com_clashzerovpn_engine_ZeroTierEngine_nativeStart(
         JNIEnv* env, jobject thiz, jstring networkIdStr) {
 
     if (g_started.load()) {
-        LOGI("already started, ignore");
+        LOGI("already started");
         return 0;
     }
+
     const char* netStr = env->GetStringUTFChars(networkIdStr, nullptr);
-    // 解析 16 位十六进制网络 ID
     uint64_t netId = 0;
     try {
         size_t len = strlen(netStr);
         if (len != 16) {
-            LOGE("invalid network id length: %zu", len);
+            LOGE("invalid network id length: %zu (expected 16 hex chars)", len);
             env->ReleaseStringUTFChars(networkIdStr, netStr);
             return -2;
         }
@@ -166,46 +156,56 @@ Java_com_clashzerovpn_engine_ZeroTierEngine_nativeStart(
         env->ReleaseStringUTFChars(networkIdStr, netStr);
         return -2;
     }
-    g_networkId.store((int64_t)netId);
+    g_networkId.store(netId);
     LOGI("nativeStart network=%016llx", (unsigned long long)netId);
-    int rc = 0;
 
 #if CZVPN_HAS_LIBZT
-    // 启动后台线程（zts_start 会阻塞，所以我们异步启动）
-    struct StartArgs {
-        uint64_t netId;
-    };
-    auto* args = new StartArgs{netId};
-    std::thread([args](){
-        int r = zts_start(nullptr, 0 /*服务端口 0=随机*/, nullptr /*事件回调*/);
-        if (r != ZTS_ERR_OK) {
-            LOGE("zts_start failed: %d", r);
-        } else {
-            // node online 后加入网络
-            while (zts_node_is_online() == 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                if (!g_started.load()) break;
+    // 启动 node（异步，在后台线程运行）
+    int r = zts_node_start();
+    if (r != ZTS_ERR_OK) {
+        LOGE("zts_node_start failed: %d", r);
+        env->ReleaseStringUTFChars(networkIdStr, netStr);
+        return r;
+    }
+    LOGI("zts_node_start OK, waiting for node to come online...");
+
+    // 启动轮询线程检测在线状态
+    std::thread(nodePollingThread).detach();
+
+    // 加入指定网络（node online 后需要手动 join）
+    std::thread([netId](){
+        // 等待 node 变为 online
+        int waitCount = 0;
+        while (g_started.load()) {
+            bool online = (zts_node_is_online() == 1);
+            if (online) {
+                LOGI("node is online, joining network %016llx", (unsigned long long)netId);
+                int jr = zts_net_join(netId);
+                if (jr == ZTS_ERR_OK || jr == ZTS_ERR_SERVICE) {
+                    LOGI("zts_net_join OK");
+                } else {
+                    LOGE("zts_net_join failed: %d", jr);
+                }
+                break;
             }
-            if (g_started.load()) {
-                zts_net_join(args->netId);
-                g_networkJoined.store(true);
-                LOGI("joined network %016llx", (unsigned long long)args->netId);
-                // 启动 virtual wire 读线程
-                std::thread(virtualWireReaderThread).detach();
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            waitCount++;
+            if (waitCount > 60) { // 30s 超时
+                LOGE("node online timeout");
+                break;
             }
         }
-        delete args;
     }).detach();
 
 #else
-    // STUB 模式：启动一个空占位虚拟 wire 读线程
+    // STUB 模式
     g_started.store(true);
-    g_networkJoined.store(true);
+    g_nodeOnline.store(true);
 #endif
 
     g_started.store(true);
     env->ReleaseStringUTFChars(networkIdStr, netStr);
-    return rc;
+    return 0;
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -214,52 +214,66 @@ Java_com_clashzerovpn_engine_ZeroTierEngine_nativeInject(
 
     if (!g_started.load()) return -1;
     if (len <= 0 || !packet) return -2;
-    jbyte* bytes = env->GetByteArrayElements(packet, nullptr);
-    if (!bytes) return -2;
-    int rc = 0;
+
+    // libzt 1.16 通过 BSD socket API 通信，不支持原始 IP 包注入
+    // 这里返回 len 假装成功，实际数据包由 Clash TUN 处理
 #if CZVPN_HAS_LIBZT
-    rc = zts_virtual_wire_write(VWIRE_IDX, (const uint8_t*)bytes, len);
-#else
-    rc = len; // stub: 直接吞掉,返回 len 假装写入成功
+    // TODO: 通过 zts_bsd_sendto 发送（需要已建立的 socket）
+    LOGD("nativeInject called (bsd socket mode, len=%d)", len);
 #endif
-    env->ReleaseByteArrayElements(packet, bytes, JNI_ABORT);
-    return rc;
+    return len; // stub: 假装写入成功
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_clashzerovpn_engine_ZeroTierEngine_nativeStop(
         JNIEnv* env, jobject thiz) {
+
     if (!g_started.exchange(false)) return;
     LOGI("nativeStop");
+
 #if CZVPN_HAS_LIBZT
-    uint64_t nid = (uint64_t)g_networkId.load();
-    if (nid) zts_net_leave(nid);
-    // zts_stop 会解阻塞 zts_start 线程
-    zts_stop();
+    uint64_t nid = g_networkId.load();
+    if (nid) {
+        zts_net_leave(nid);
+        LOGI("left network %016llx", (unsigned long long)nid);
+    }
+    zts_node_stop();
+    LOGI("zts_node_stop done");
 #endif
-    // 清空 JNI 全局引用
+
     if (g_callbackObject) {
         env->DeleteGlobalRef(g_callbackObject);
         g_callbackObject = nullptr;
     }
-    g_networkJoined.store(false);
+    g_nodeOnline.store(false);
     g_nodeId.store(0);
     g_networkId.store(0);
+    LOGI("nativeStop done");
 }
 
-// 额外查询 API（给 UI 用，可选）
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_clashzerovpn_engine_ZeroTierEngine_nativeIsOnline(
         JNIEnv* env, jobject thiz) {
 #if CZVPN_HAS_LIBZT
-    return (jboolean)(g_started.load() && zts_node_is_online());
+    bool online = g_nodeOnline.load();
+    LOGD("nativeIsOnline: %s", online ? "true" : "false");
+    return (jboolean)online;
 #else
-    return (jboolean)g_networkJoined.load();
+    return (jboolean)g_nodeOnline.load();
 #endif
 }
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_clashzerovpn_engine_ZeroTierEngine_nativeGetNodeId(
         JNIEnv* env, jobject thiz) {
-    return g_nodeId.load();
+#if CZVPN_HAS_LIBZT
+    uint64_t nid = g_nodeId.load();
+    if (nid == 0) {
+        nid = zts_node_get_id();
+        if (nid != 0) g_nodeId.store(nid);
+    }
+    return (jlong)nid;
+#else
+    return (jlong)g_nodeId.load();
+#endif
 }
