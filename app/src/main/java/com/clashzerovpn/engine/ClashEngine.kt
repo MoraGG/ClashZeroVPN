@@ -127,7 +127,7 @@ class ClashEngine : VpnEngine {
 
             Log.d(TAG, "  SubStep 4: Bridge.nativeLoad()")
             val loadFuture = CompletableDeferred<Unit>()
-            Bridge.nativeLoad(loadFuture, configFile.absolutePath)
+            Bridge.nativeLoad(loadFuture, clashHome.absolutePath)
             scope.launch {
                 val ok = withTimeoutOrNull(30_000) { loadFuture.await() }
                 if (ok == null) Log.w(TAG, "  SubStep 4: nativeLoad TIMEOUT")
