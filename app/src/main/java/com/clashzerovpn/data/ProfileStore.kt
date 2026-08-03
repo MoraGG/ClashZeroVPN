@@ -30,6 +30,16 @@ class ProfileStore(context: Context) {
                 }
             } catch (_: Exception) {}
         }
+        // 单独读取 ztSubnets（用户自定义的 ZeroTier 内网网段）
+        val subnetsStr = prefs.getString(KEY_ZT_SUBNETS, null)
+        if (!subnetsStr.isNullOrEmpty()) {
+            try {
+                val arr = JSONArray(subnetsStr)
+                val list = mutableListOf<String>()
+                for (i in 0 until arr.length()) list.add(arr.getString(i))
+                if (list.isNotEmpty()) profile.ztSubnets = list
+            } catch (_: Exception) {}
+        }
         return profile
     }
 
@@ -42,6 +52,9 @@ class ProfileStore(context: Context) {
         val arr = JSONArray()
         profile.zeroTierCidrs.forEach { arr.put(it) }
         ed.putString(KEY_ZT_CIDRS, arr.toString())
+        val arr2 = JSONArray()
+        profile.ztSubnets.forEach { arr2.put(it) }
+        ed.putString(KEY_ZT_SUBNETS, arr2.toString())
         ed.apply()
     }
 
@@ -58,6 +71,7 @@ class ProfileStore(context: Context) {
         private const val KEY_CLASH_CONFIG = "clash_config_path"
         private const val KEY_ZT_NETWORK = "zt_network_id"
         private const val KEY_ZT_CIDRS = "zt_cidrs"
+        private const val KEY_ZT_SUBNETS = "zt_subnets"
         private const val KEY_TUN_MTU = "tun_mtu"
         private const val KEY_TUN_ADDR = "tun_addr"
     }

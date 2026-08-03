@@ -102,6 +102,7 @@ class MainActivity : AppCompatActivity() {
         }
         binding.etZTNetwork.setText(profile.zeroTierNetworkId)
         binding.etZTNetwork.filters = arrayOf<InputFilter>(LengthFilter(16))
+        binding.etZTCidrs.setText(profile.ztSubnets.joinToString(", "))
 
         // 主开关
         binding.switchVpn.setOnCheckedChangeListener { _, isChecked ->
@@ -126,10 +127,20 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
             binding.tilZTNetwork.error = null
+            // 解析逗号分隔的 CIDR 网段
+            val cidrText = binding.etZTCidrs.text?.toString() ?: ""
+            val subnets = cidrText.split(",")
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
             val p = profileStore.load()
             p.zeroTierNetworkId = id
+            p.ztSubnets = subnets
             profileStore.save(p)
-            Toast.makeText(this, "已保存 ZeroTier 网络 ID: $id", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                "已保存 ZeroTier 网络 (${p.ztSubnets.size} 个网段)",
+                Toast.LENGTH_SHORT
+            ).show()
         }
 
         // 节点选择按钮

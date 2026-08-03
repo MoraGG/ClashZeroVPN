@@ -291,6 +291,21 @@ class CZVpnService : VpnService() {
         builder.addDisallowedApplication(packageName)
         builder.addSearchDomain("local")
 
+        // 添加 ZeroTier 内网网段路由（确保 ZeroTier 流量走 VPN）
+        profile.ztSubnets.forEach { cidr ->
+            try {
+                val parts = cidr.split("/")
+                if (parts.size == 2) {
+                    val addr = parts[0]
+                    val prefix = parts[1].toIntOrNull() ?: 24
+                    builder.addRoute(addr, prefix)
+                    Log.d(TAG, "  ZT route added: $addr/$prefix")
+                }
+            } catch (_: Exception) {
+                Log.w(TAG, "  ZT route parse failed: $cidr")
+            }
+        }
+
         Log.d(TAG, "  TunBuilder: routes=0.0.0.0/0, DNS=198.18.0.1,${profile.dns1},${profile.dns2}")
         Log.d(TAG, "  TunBuilder: excludedApp=$packageName")
 
