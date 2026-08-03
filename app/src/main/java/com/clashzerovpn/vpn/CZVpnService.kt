@@ -101,10 +101,11 @@ class CZVpnService : VpnService() {
 
             // 启动 Clash（用 try-catch 防止 native 库问题导致崩溃）
             try {
+                Log.d(TAG, "Starting Clash engine...")
                 clashEngine.start()
+                Log.d(TAG, "Clash engine started OK")
             } catch (e: Throwable) {
-                Log.e(TAG, "Clash engine start failed: ${e.message}", e)
-                // 不再回退到 stub 模式，直接通知失败
+                Log.e(TAG, "Clash engine start FAILED: ${e.message}", e)
                 _state.value = VpnState.FAILED
                 stopSelf()
                 return

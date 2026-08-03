@@ -76,12 +76,15 @@ class ClashEngine : VpnEngine {
     fun start() {
         val cb = onOutbound ?: onOutboundPacket
         if (cb == null) {
-            Log.w(TAG, "onOutbound callback not set; stub start")
-            running = true
-            _isReadyFlow.value = true
+            Log.w(TAG, "onOutbound callback not set; refusing to start without it")
             return
         }
-        startInternal(null, _configPath, cb)
+        try {
+            startInternal(null, _configPath, cb)
+        } catch (e: Throwable) {
+            Log.e(TAG, "ClashEngine.start() threw: ${e.message}", e)
+            throw e  // 让调用方收到异常
+        }
     }
 
     private fun startInternal(
@@ -91,8 +94,7 @@ class ClashEngine : VpnEngine {
     ): Boolean {
         return try {
             // 1) 确保 Bridge 初始化（加载 libbridge.so + nativeInit）
-            runCatching { Bridge.ensureInitialized() }
-                .onFailure { Log.w(TAG, "Bridge init warning: ${it.message}") }
+            Bridge.ensureInitialized()
 
             // 2) 创建 socketpair（双向 fd）— Android 公开 API，API 19+
             val pfds = ParcelFileDescriptor.createReliableSocketPair()
@@ -101,8 +103,9 @@ class ClashEngine : VpnEngine {
             writeFos = FileOutputStream(pfds[1].fileDescriptor)
 
             // 3) 准备 clash home + config
-            val ctx = context ?: com.github.kr328.clash.common.Global.application
-                ?: throw IllegalStateException("Global.application not initialized - CZApplication may not be registered in manifest")
+            val ctx: android.content.Context = context
+                ?: com.github.kr328.clash.common.Global.application
+                ?: throw IllegalStateException("Global.application == null: CZApplication.onCreate() 未被调用，请确认 AndroidManifest.xml 注册了 CZApplication")
             val clashHome = File(_homeDir ?: (ctx.filesDir.absolutePath + File.separator + "clash"))
                 .apply { if (!exists()) mkdirs() }
             listOf("cache", "logs", "profiles").forEach {
@@ -173,12 +176,8 @@ class ClashEngine : VpnEngine {
             Log.i(TAG, "Clash engine started (real Mihomo kernel via socketpair)")
             true
         } catch (e: Throwable) {
-            Log.e(TAG, "Failed to start Clash engine (real)", e)
-            // 失败回退到 stub 模式，避免整个 App 启动失败
-            running = true
-            _isReadyFlow.value = true
-            Log.w(TAG, "Fallback to stub mode after real start failed")
-            false
+            Log.e(TAG, "Failed to start Clash engine", e)
+            throw e  // 传播错误，不回退
         }
     }
 
