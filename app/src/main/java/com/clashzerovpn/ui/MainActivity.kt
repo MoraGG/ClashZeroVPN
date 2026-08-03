@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.text.InputFilter
 import android.text.InputFilter.LengthFilter
+import android.util.Log
 import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
@@ -40,6 +41,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var profileStore: ProfileStore
     private var clashConfig: ClashConfig? = null
     private var selectedNode: ProxyNode? = null
+    private var selectedMode: String = "规则" // 规则/全局/直连
 
     private val vpnPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -134,6 +136,18 @@ class MainActivity : AppCompatActivity() {
         binding.btnSelectNode.setOnClickListener {
             showNodeSelectionDialog()
         }
+
+        // 模式选择器
+        val modes = listOf("规则", "全局", "直连")
+        val modeAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, modes)
+        binding.spinnerMode.adapter = modeAdapter
+        binding.spinnerMode.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                selectedMode = modes[position]
+                updateModeUI()
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
     }
 
     /**
@@ -152,6 +166,7 @@ class MainActivity : AppCompatActivity() {
                     if (validNodes.isNotEmpty()) {
                         binding.tvNodeCount.text = "共 ${validNodes.size} 个节点"
                         binding.tvNodeCount.visibility = View.VISIBLE
+                        binding.btnSelectNode.visibility = View.VISIBLE
 
                         // 自动选择第一个节点
                         if (selectedNode == null) {
@@ -273,6 +288,13 @@ class MainActivity : AppCompatActivity() {
             binding.tvSelectedNode.text = "当前节点: ${node.name}"
             binding.tvSelectedNode.visibility = View.VISIBLE
         }
+    }
+
+    /**
+     * 更新模式 UI（目前只是占位，实际模式切换需要调用 Clash API）
+     */
+    private fun updateModeUI() {
+        Log.d(TAG, "Switched to mode: $selectedMode")
     }
 
     private fun tryStartVpn() {

@@ -102,6 +102,7 @@ class ClashEngine : VpnEngine {
 
             // 3) 准备 clash home + config
             val ctx = context ?: com.github.kr328.clash.common.Global.application
+                ?: throw IllegalStateException("Global.application not initialized - CZApplication may not be registered in manifest")
             val clashHome = File(_homeDir ?: (ctx.filesDir.absolutePath + File.separator + "clash"))
                 .apply { if (!exists()) mkdirs() }
             listOf("cache", "logs", "profiles").forEach {

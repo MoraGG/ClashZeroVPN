@@ -99,8 +99,16 @@ class CZVpnService : VpnService() {
                 zeroTierEngine.init(profile.zeroTierNetworkId, filesDir.absolutePath)
             }
 
-            // 启动 Clash
-            clashEngine.start()
+            // 启动 Clash（用 try-catch 防止 native 库问题导致崩溃）
+            try {
+                clashEngine.start()
+            } catch (e: Throwable) {
+                Log.e(TAG, "Clash engine start failed: ${e.message}", e)
+                // 不再回退到 stub 模式，直接通知失败
+                _state.value = VpnState.FAILED
+                stopSelf()
+                return
+            }
 
             // 启动 ZeroTier
             if (profile.zeroTierNetworkId.isNotEmpty()) {

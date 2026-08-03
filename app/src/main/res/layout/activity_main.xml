@@ -124,6 +124,27 @@
                     android:textSize="13sp"
                     android:visibility="gone" />
 
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:layout_marginTop="4dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="模式:"
+                        android:textSize="13sp" />
+
+                    <Spinner
+                        android:id="@+id/spinnerMode"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginStart="8dp" />
+                </LinearLayout>
+
                 <TextView
                     android:id="@+id/tvSelectedNode"
                     android:layout_width="match_parent"
