@@ -163,9 +163,9 @@ class CZVpnService : VpnService() {
             Log.w(TAG, "VPN loop thread terminated unexpectedly")
         }
 
+        var packetCount = 0
         try {
             Log.d(TAG, "TUN read loop started")
-            var packetCount = 0
 
             while (true) {
                 val n = fis.read(buffer)
