@@ -203,12 +203,19 @@ class ClashEngine : VpnEngine {
         running = false
         _isReadyFlow.value = false
         loopbackJob?.cancel(); loopbackJob = null
-        runCatching { Bridge.nativeStopTun() }
-        runCatching { Bridge.nativeReset() }
-        pairPfd?.forEach { runCatching { it.close() } }; pairPfd = null
-        runCatching { readFis?.close() }; readFis = null
-        runCatching { writeFos?.close() }; writeFos = null
-        // 不要 cancel(scope)，否则同一实例无法重启
+        try {
+            Bridge.nativeStopTun()
+        } catch (e: Throwable) {
+            Log.w(TAG, "nativeStopTun failed: ${e.message}")
+        }
+        try {
+            Bridge.nativeReset()
+        } catch (e: Throwable) {
+            Log.w(TAG, "nativeReset failed: ${e.message}")
+        }
+        pairPfd?.forEach { try { it.close() } catch (_: Throwable) {} }; pairPfd = null
+        try { readFis?.close() } catch (_: Throwable) {}; readFis = null
+        try { writeFos?.close() } catch (_: Throwable) {}; writeFos = null
         onOutbound = null
         onOutboundPacket = null
         Log.i(TAG, "Clash engine stopped")
