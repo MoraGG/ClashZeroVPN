@@ -131,12 +131,12 @@ class ClashEngine : VpnEngine {
             Log.d(TAG, "  SubStep 4: Bridge.nativeLoad()")
             val loadFuture = CompletableDeferred<Unit>()
             Bridge.nativeLoad(loadFuture, clashHome.absolutePath)
-            scope.launch {
-                val ok = withTimeoutOrNull(30_000) { loadFuture.await() }
-                if (ok == null) Log.w(TAG, "  SubStep 4: nativeLoad TIMEOUT")
-                else Log.d(TAG, "  SubStep 4: nativeLoad OK")
+            Log.d(TAG, "  SubStep 4: waiting for nativeLoad to complete...")
+            kotlinx.coroutines.runBlocking {
+                val ok = withTimeoutOrNull(30_000L) { loadFuture.await() }
+                if (ok == null) throw IllegalStateException("nativeLoad timeout")
             }
-            Log.d(TAG, "  SubStep 4 launched async")
+            Log.d(TAG, "  SubStep 4 OK: nativeLoad completed, now starting TUN")
 
             Log.d(TAG, "  SubStep 5: Bridge.nativeStartTun()")
             val stack = "gvisor"
