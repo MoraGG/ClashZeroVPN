@@ -1,6 +1,7 @@
 package com.clashzerovpn.ui
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
@@ -8,6 +9,9 @@ import android.os.Bundle
 import android.text.InputFilter
 import android.text.InputFilter.LengthFilter
 import android.view.View
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
+import android.widget.Spinner
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -16,7 +20,11 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.clashzerovpn.R
+import com.clashzerovpn.data.ClashConfig
+import com.clashzerovpn.data.ClashConfigParser
 import com.clashzerovpn.data.ProfileStore
+import com.clashzerovpn.data.ProxyGroup
+import com.clashzerovpn.data.ProxyNode
 import com.clashzerovpn.data.VpnState
 import com.clashzerovpn.databinding.ActivityMainBinding
 import com.clashzerovpn.engine.ClashEngine
@@ -24,12 +32,14 @@ import com.clashzerovpn.engine.ZeroTierEngine
 import com.clashzerovpn.vpn.CZVpnService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.io.File
+import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var profileStore: ProfileStore
+    private var clashConfig: ClashConfig? = null
+    private var selectedNode: ProxyNode? = null
 
     private val vpnPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -51,6 +61,9 @@ class MainActivity : AppCompatActivity() {
                 profileStore.save(profile)
                 binding.tvClashConfig.text = fname
                 Toast.makeText(this, "Clash 配置已导入", Toast.LENGTH_SHORT).show()
+
+                // 解析配置并更新 UI
+                loadAndDisplayNodes(fname)
             } catch (e: Exception) {
                 android.util.Log.e(TAG, "Import clash failed", e)
                 Toast.makeText(this, "导入失败: ${e.message}", Toast.LENGTH_LONG).show()
@@ -72,6 +85,12 @@ class MainActivity : AppCompatActivity() {
 
         initUI()
         observeState()
+
+        // 如果已有配置，加载节点
+        val profile = profileStore.load()
+        if (profile.clashConfigPath.isNotEmpty()) {
+            loadAndDisplayNodes(profile.clashConfigPath)
+        }
     }
 
     private fun initUI() {
@@ -110,6 +129,150 @@ class MainActivity : AppCompatActivity() {
             profileStore.save(p)
             Toast.makeText(this, "已保存 ZeroTier 网络 ID: $id", Toast.LENGTH_SHORT).show()
         }
+
+        // 节点选择按钮
+        binding.btnSelectNode.setOnClickListener {
+            showNodeSelectionDialog()
+        }
+    }
+
+    /**
+     * 加载配置并显示节点
+     */
+    private fun loadAndDisplayNodes(configPath: String) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val parser = ClashConfigParser()
+            val config = parser.parse(configPath)
+
+            withContext(Dispatchers.Main) {
+                if (config != null && config.proxies.isNotEmpty()) {
+                    clashConfig = config
+                    val validNodes = config.getAvailableNodes()
+
+                    if (validNodes.isNotEmpty()) {
+                        binding.tvNodeCount.text = "共 ${validNodes.size} 个节点"
+                        binding.tvNodeCount.visibility = View.VISIBLE
+
+                        // 自动选择第一个节点
+                        if (selectedNode == null) {
+                            selectedNode = validNodes.first()
+                            updateSelectedNodeUI()
+                        }
+
+                        Toast.makeText(
+                            this@MainActivity,
+                            "成功加载 ${validNodes.size} 个节点",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    } else {
+                        binding.tvNodeCount.text = "未找到有效节点"
+                        binding.tvNodeCount.visibility = View.VISIBLE
+                    }
+                } else {
+                    binding.tvNodeCount.text = "解析配置失败"
+                    binding.tvNodeCount.visibility = View.VISIBLE
+                    Toast.makeText(
+                        this@MainActivity,
+                        "配置解析失败，请检查文件格式",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+        }
+    }
+
+    /**
+     * 显示节点选择对话框
+     */
+    private fun showNodeSelectionDialog() {
+        val config = clashConfig
+        if (config == null || config.proxies.isEmpty()) {
+            Toast.makeText(this, "请先导入 Clash 配置", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val nodes = config.getAvailableNodes()
+        if (nodes.isEmpty()) {
+            Toast.makeText(this, "配置中没有有效节点", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // 按类型分组显示
+        val groupedNodes = nodes.groupBy { it.type }
+
+        // 创建对话框布局
+        val dialogView = layoutInflater.inflate(R.layout.dialog_node_selection, null)
+        val spinnerType = dialogView.findViewById<Spinner>(R.id.spinner_node_type)
+        val spinnerNode = dialogView.findViewById<Spinner>(R.id.spinner_node)
+
+        // 类型选择器
+        val types = listOf("全部") + groupedNodes.keys.sorted()
+        val typeAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, types)
+        spinnerType.adapter = typeAdapter
+
+        // 节点选择器
+        var currentNodes = nodes
+        var nodeAdapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            currentNodes.map { "${it.name} (${it.getTypeDisplayName()})" }
+        )
+        spinnerNode.adapter = nodeAdapter
+
+        // 类型切换监听
+        spinnerType.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                currentNodes = if (position == 0) {
+                    nodes
+                } else {
+                    groupedNodes[types[position]] ?: nodes
+                }
+                nodeAdapter = ArrayAdapter(
+                    this@MainActivity,
+                    android.R.layout.simple_spinner_dropdown_item,
+                    currentNodes.map { "${it.name} (${it.getTypeDisplayName()})" }
+                )
+                spinnerNode.adapter = nodeAdapter
+            }
+
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
+        // 设置当前选中的节点
+        selectedNode?.let { selected ->
+            val index = currentNodes.indexOfFirst { it.name == selected.name }
+            if (index >= 0) {
+                spinnerNode.setSelection(index)
+            }
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("选择节点")
+            .setView(dialogView)
+            .setPositiveButton("确定") { _, _ ->
+                val selectedIndex = spinnerNode.selectedItemPosition
+                if (selectedIndex >= 0 && selectedIndex < currentNodes.size) {
+                    selectedNode = currentNodes[selectedIndex]
+                    updateSelectedNodeUI()
+                    Toast.makeText(
+                        this,
+                        "已选择: ${selectedNode?.name}",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /**
+     * 更新已选节点 UI
+     */
+    private fun updateSelectedNodeUI() {
+        selectedNode?.let { node ->
+            binding.tvSelectedNode.text = "当前节点: ${node.name}"
+            binding.tvSelectedNode.visibility = View.VISIBLE
+        }
     }
 
     private fun tryStartVpn() {
@@ -140,8 +303,6 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 launch {
-                    // 引擎状态：这里使用 SharedFlow 也能直接订阅，所以用 dispatcher 里的 flow
-                    // 简化：单独轮询
                     renderEngineStatus()
                 }
             }
@@ -172,11 +333,9 @@ class MainActivity : AppCompatActivity() {
             }
         }
         lifecycleScope.launch(Dispatchers.IO) {
-            // 订阅引擎状态 flow
             val ztEngine = CZVpnService.lastZeroTierEngine
             val clashEngine = CZVpnService.lastClashEngine
             runOnUiThread {
-                // Clash 状态
                 if (clashEngine != null) {
                     binding.tvClashStatus.text = if (clashEngine.isReadyFlow.value) "就绪" else "未就绪"
                     binding.tvClashStatus.setTextColor(ContextCompat.getColor(
@@ -184,7 +343,6 @@ class MainActivity : AppCompatActivity() {
                         if (clashEngine.isReadyFlow.value) R.color.status_on else R.color.status_off
                     ))
                 }
-                // ZT 状态
                 if (ztEngine != null) {
                     val online = ztEngine.isOnlineFlow.value
                     val nid = ztEngine.nodeIdFlow.value
@@ -219,14 +377,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun copyToAppStorage(uri: android.net.Uri, defaultName: String): String {
-        val dir = File(filesDir, "configs")
+        val dir = java.io.File(filesDir, "configs")
         if (!dir.exists()) dir.mkdirs()
         val name = contentResolver.query(uri, null, null, null, null)?.use { c ->
             val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
             c.moveToFirst()
             if (idx >= 0) c.getString(idx) else defaultName
         } ?: defaultName
-        val out = File(dir, name)
+        val out = java.io.File(dir, name)
         contentResolver.openInputStream(uri).use { inp ->
             out.outputStream().use { outS -> inp?.copyTo(outS) }
         }
