@@ -19,11 +19,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
-import java.io.FileDescriptor
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.lang.ref.WeakReference
-import kotlin.concurrent.thread
 
 class CZVpnService : VpnService() {
 
@@ -59,88 +57,124 @@ class CZVpnService : VpnService() {
     }
 
     private fun startInternal() {
-        if (vpnJob != null && vpnJob?.isActive == true) return
+        if (vpnJob?.isActive == true) {
+            Log.d(TAG, "VPN already running, skip startInternal")
+            return
+        }
         Log.d(TAG, "=== startInternal BEGIN ===")
-        _state.value = VpnState.CONNECTING
 
         try {
-            Log.d(TAG, "Step 1: ProfileStore.load()")
+            _state.value = VpnState.CONNECTING
+            Log.d(TAG, "Step1: load profile")
             profile = ProfileStore(this).load()
-            Log.d(TAG, "Step 1 OK: clashConfigPath=${profile.clashConfigPath}")
+            Log.d(TAG, "Step1 OK: clashConfigPath=${profile.clashConfigPath}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Step1 FAILED: ${t.message}", t)
+            _state.value = VpnState.FAILED
+            return
+        }
 
-            Log.d(TAG, "Step 2: establishTun()")
-            val fd = establishTun(profile)
+        val fd: android.os.ParcelFileDescriptor
+        try {
+            Log.d(TAG, "Step2: establish TUN")
+            fd = establishTun(profile)
             tunFd = fd
-            Log.d(TAG, "Step 2 OK: TUN fd=${fd.fd}")
+            Log.d(TAG, "Step2 OK: TUN fd=${fd.fd}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Step2 FAILED: ${t.message}", t)
+            _state.value = VpnState.FAILED
+            return
+        }
 
-            Log.d(TAG, "Step 3: ClashEngine() init")
-            clashEngine = ClashEngine().apply {
-                onOutboundPacket = { writeToTun(it) }
-            }
-            Log.d(TAG, "Step 3 OK")
-
-            Log.d(TAG, "Step 4: ZeroTierEngine() init")
-            zeroTierEngine = ZeroTierEngine().apply {
-                onOutboundPacket = { writeToTun(it) }
-            }
-            Log.d(TAG, "Step 4 OK")
-
+        try {
+            Log.d(TAG, "Step3: create engines")
+            clashEngine = ClashEngine().apply { onOutboundPacket = { writeToTun(it) } }
+            zeroTierEngine = ZeroTierEngine().apply { onOutboundPacket = { writeToTun(it) } }
             lastClashEngine = clashEngine
             lastZeroTierEngine = zeroTierEngine
+            Log.d(TAG, "Step3 OK")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Step3 FAILED: ${t.message}", t)
+            runCatching { tunFd?.close() }
+            tunFd = null
+            _state.value = VpnState.FAILED
+            return
+        }
 
-            Log.d(TAG, "Step 5: PacketDispatcher init")
+        try {
+            Log.d(TAG, "Step4: PacketDispatcher init")
             dispatcher = PacketDispatcher(
                 clashEngine = clashEngine,
                 zeroTierEngine = zeroTierEngine,
                 ztSubnets = profile.ztSubnets
             )
-            Log.d(TAG, "Step 5 OK")
+            Log.d(TAG, "Step4 OK")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Step4 FAILED: ${t.message}", t)
+            runCatching { tunFd?.close() }
+            tunFd = null
+            _state.value = VpnState.FAILED
+            return
+        }
 
-            Log.d(TAG, "Step 6: clashEngine.init()")
-            clashEngine.init(
-                filesDir.absolutePath,
-                profile.clashConfigPath,
-                profile.mihomoPort
-            )
-            Log.d(TAG, "Step 6 OK")
+        try {
+            Log.d(TAG, "Step5: clashEngine.init(home=${filesDir.absolutePath}, config=${profile.clashConfigPath}, port=${profile.mihomoPort})")
+            clashEngine.init(filesDir.absolutePath, profile.clashConfigPath, profile.mihomoPort)
+            Log.d(TAG, "Step5 OK")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Step5 FAILED: ${t.message}", t)
+            runCatching { tunFd?.close() }
+            tunFd = null
+            _state.value = VpnState.FAILED
+            return
+        }
 
-            if (profile.zeroTierNetworkId.isNotEmpty()) {
-                Log.d(TAG, "Step 7: zeroTierEngine.init()")
-                zeroTierEngine.init(profile.zeroTierNetworkId, filesDir.absolutePath)
-                Log.d(TAG, "Step 7 OK")
-            }
-
-            Log.d(TAG, "Step 8: clashEngine.start()")
+        if (profile.zeroTierNetworkId.isNotEmpty()) {
             try {
-                clashEngine.start()
-                Log.d(TAG, "Step 8 OK - Clash engine started")
-            } catch (e: Throwable) {
-                Log.e(TAG, "Step 8 FAILED: ${e.message}", e)
+                Log.d(TAG, "Step6: zeroTierEngine.init()")
+                zeroTierEngine.init(profile.zeroTierNetworkId, filesDir.absolutePath)
+                Log.d(TAG, "Step6 OK")
+            } catch (t: Throwable) {
+                Log.e(TAG, "Step6 FAILED: ${t.message}", t)
+                runCatching { tunFd?.close() }
+                tunFd = null
                 _state.value = VpnState.FAILED
-                stopSelf()
                 return
             }
+        }
 
-            if (profile.zeroTierNetworkId.isNotEmpty()) {
-                scope.launch {
-                    try {
-                        zeroTierEngine.start()
-                    } catch (e: Exception) {
-                        Log.e(TAG, "ZT start failed", e)
-                    }
+        try {
+            Log.d(TAG, "Step7: clashEngine.start()")
+            clashEngine.start()
+            Log.d(TAG, "Step7 OK")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Step7 FAILED: ${t.message}", t)
+            runCatching { tunFd?.close() }
+            tunFd = null
+            _state.value = VpnState.FAILED
+            return
+        }
+
+        if (profile.zeroTierNetworkId.isNotEmpty()) {
+            scope.launch {
+                try {
+                    zeroTierEngine.start()
+                } catch (e: Exception) {
+                    Log.e(TAG, "ZT start failed", e)
                 }
             }
+        }
 
+        try {
             _state.value = VpnState.CONNECTED
             vpnJob = scope.launch { tunLoop(fd) }
             scope.launch { trafficTick() }
-
-            Log.i(TAG, "VPN started successfully")
-
+            Log.i(TAG, "=== VPN started successfully ===")
         } catch (t: Throwable) {
-            Log.e(TAG, "startInternal FAILED at some step: ${t.message}", t)
+            Log.e(TAG, "Step8 (loop start) FAILED: ${t.message}", t)
+            runCatching { tunFd?.close() }
+            tunFd = null
             _state.value = VpnState.FAILED
-            stopSelf()
         }
         Log.d(TAG, "=== startInternal END ===")
     }
@@ -164,28 +198,14 @@ class CZVpnService : VpnService() {
 
     private suspend fun tunLoop(fd: android.os.ParcelFileDescriptor) {
         val fis = FileInputStream(fd.fileDescriptor)
-        // 使用合理的缓冲区大小
-        val buffer = ByteArray(profile.tunMtu)
-        val target = Thread.currentThread()
+        val mtu = profile.tunMtu.coerceIn(1280, 32768)
+        val buffer = ByteArray(mtu)
+        var packetCount = 0L
 
-        // 线程监控，用于检测主线程是否异常退出
-        val watcher = thread(name = "cz-vpn-watcher", isDaemon = true) {
-            while (target.isAlive) {
-                try {
-                    Thread.sleep(500)
-                } catch (_: InterruptedException) {
-                    return@thread
-                }
-            }
-            Log.w(TAG, "VPN loop thread terminated unexpectedly")
-        }
-
-        var packetCount = 0
         try {
-            Log.d(TAG, "TUN read loop started")
-
+            Log.d(TAG, "TUN read loop started, mtu=$mtu")
             while (true) {
-                val n = fis.read(buffer)
+                val n: Int = fis.read(buffer)
                 if (n < 0) {
                     Log.d(TAG, "TUN read returned EOF")
                     break
@@ -198,18 +218,15 @@ class CZVpnService : VpnService() {
                 val pkt = buffer.copyOf(n)
                 totalRxBytes += n
 
-                // 分发数据包到对应的引擎
                 dispatcher.injectTunPacket(pkt)
 
-                // 每 1000 个包打印一次日志
-                if (packetCount % 1000 == 0) {
-                    Log.v(TAG, "Processed $packetCount packets, total rx: $totalRxBytes bytes")
+                if (packetCount % 5000 == 0L) {
+                    Log.v(TAG, "Packets: $packetCount, rx: $totalRxBytes bytes")
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "TUN read loop error", e)
+            Log.e(TAG, "TUN read loop error: ${e.message}", e)
         } finally {
-            watcher.interrupt()
             runCatching { fis.close() }
             Log.d(TAG, "TUN read loop ended. Total packets: $packetCount")
         }
@@ -236,7 +253,7 @@ class CZVpnService : VpnService() {
         var lastRx = 0L
         var lastTx = 0L
 
-        while (_state.value.let { it == VpnState.CONNECTED || it == VpnState.CONNECTING }) {
+        while (_state.value == VpnState.CONNECTED || _state.value == VpnState.CONNECTING) {
             delay(1000)
             val rx = totalRxBytes
             val tx = totalTxBytes
@@ -252,14 +269,6 @@ class CZVpnService : VpnService() {
         }
     }
 
-    /**
-     * 建立 TUN 接口
-     * 关键配置：
-     * 1. 添加 Fake-IP DNS 服务器 (198.18.0.1)
-     * 2. 添加全流量路由 (0.0.0.0/0)
-     * 3. 设置合理的 MTU
-     * 4. 排除 VPN 应用自身避免循环
-     */
     private fun establishTun(profile: VpnProfile): android.os.ParcelFileDescriptor {
         Log.d(TAG, "  TunBuilder: session=${getString(com.clashzerovpn.R.string.app_name)}")
         Log.d(TAG, "  TunBuilder: address=${profile.vpnAddr}/${profile.vpnPrefix}, mtu=${profile.tunMtu}")
@@ -275,8 +284,8 @@ class CZVpnService : VpnService() {
         builder.addRoute("0.0.0.0", 0)
         builder.addRoute("::", 0)
         builder.addDnsServer("198.18.0.1")
-        builder.addDnsServer(profile.dns1)
-        if (profile.dns2 != profile.dns1) {
+        if (profile.dns1.isNotEmpty()) builder.addDnsServer(profile.dns1)
+        if (profile.dns2.isNotEmpty() && profile.dns2 != profile.dns1) {
             builder.addDnsServer(profile.dns2)
         }
         builder.addDisallowedApplication(packageName)

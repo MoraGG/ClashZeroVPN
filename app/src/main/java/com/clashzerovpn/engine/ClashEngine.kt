@@ -194,19 +194,16 @@ class ClashEngine : VpnEngine {
     }
 
     override fun stop() {
+        if (!running) return
         running = false
         _isReadyFlow.value = false
-        loopbackJob?.cancel()
-        loopbackJob = null
+        loopbackJob?.cancel(); loopbackJob = null
         runCatching { Bridge.nativeStopTun() }
         runCatching { Bridge.nativeReset() }
-        pairPfd?.forEach { pfd ->
-            runCatching { pfd.close() }
-        }
-        pairPfd = null
+        pairPfd?.forEach { runCatching { it.close() } }; pairPfd = null
         runCatching { readFis?.close() }; readFis = null
         runCatching { writeFos?.close() }; writeFos = null
-        scope.cancel()
+        // 不要 cancel(scope)，否则同一实例无法重启
         onOutbound = null
         onOutboundPacket = null
         Log.i(TAG, "Clash engine stopped")
