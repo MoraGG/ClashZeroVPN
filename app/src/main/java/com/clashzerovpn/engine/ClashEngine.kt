@@ -119,11 +119,14 @@ class ClashEngine : VpnEngine {
                 ?.let { File(it) }
                 ?.let { if (it.isDirectory()) it else it.parentFile }
                 ?: File(ctx.filesDir, "clash").also { it.mkdirs() }
-            val configFile = resolvedConfigPath.resolve("config.yaml")
-            if (!configFile.exists()) {
-                writeDefaultClashConfig(ctx, configFile)
+            // nativeLoad 在 clashHome 下找 config.yaml，所以要复制到那里
+            val clashHomeConfig = File(clashHome, "config.yaml")
+            if (explicitConfigPath?.let { File(it).takeIf { f -> f.exists() } } != null) {
+                File(explicitConfigPath!!).copyTo(clashHomeConfig, overwrite = true)
+            } else if (!clashHomeConfig.exists()) {
+                writeDefaultClashConfig(ctx, clashHomeConfig)
             }
-            Log.d(TAG, "  SubStep 3 OK: home=${clashHome.absolutePath}, configDir=${resolvedConfigPath.absolutePath}")
+            Log.d(TAG, "  SubStep 3 OK: home=${clashHome.absolutePath}, configDir=${resolvedConfigPath.absolutePath}, clashHomeConfig=${clashHomeConfig.absolutePath}")
 
             Log.d(TAG, "  SubStep 4: Bridge.nativeLoad()")
             val loadFuture = CompletableDeferred<Unit>()
