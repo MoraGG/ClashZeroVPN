@@ -17,6 +17,17 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
     
+    - name: Debug - Show files
+      run: |
+        echo "=== Current directory ==="
+        pwd
+        echo ""
+        echo "=== Files in directory ==="
+        ls -la
+        echo ""
+        echo "=== gradlew permissions ==="
+        ls -la gradlew
+    
     - name: Setup JDK
       uses: actions/setup-java@v4
       with:
@@ -25,6 +36,24 @@ jobs:
     
     - name: Setup Android SDK
       uses: android-actions/setup-android@v2
+    
+    - name: Debug - Show Android SDK
+      run: |
+        echo "=== Android SDK ==="
+        echo "ANDROID_HOME: $ANDROID_HOME"
+        echo "ANDROID_SDK_ROOT: $ANDROID_SDK_ROOT"
+        ls -la $ANDROID_HOME 2>/dev/null || echo "SDK not found"
+    
+    - name: Accept Android SDK licenses
+      run: |
+        echo "=== Accepting licenses ==="
+        if [ -d "$ANDROID_HOME/cmdline-tools/latest/bin" ]; then
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+        fi
+        if [ -d "$ANDROID_HOME/tools/bin" ]; then
+          yes | $ANDROID_HOME/tools/bin/sdkmanager --licenses || true
+        fi
+        echo "=== License check complete ==="
     
     - name: Cache Gradle packages
       uses: actions/cache@v3
@@ -36,14 +65,27 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-gradle-
     
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
+    - name: Make gradlew executable
+      run: |
+        echo "=== Making gradlew executable ==="
+        chmod +x gradlew
+        ls -la gradlew
     
     - name: Build Debug APK
-      run: ./gradlew assembleDebug --no-daemon
+      run: |
+        echo "=== Building APK ==="
+        ./gradlew assembleDebug --no-daemon --stacktrace
       env:
         ANDROID_HOME: /opt/android-sdk
         ANDROID_SDK_ROOT: /opt/android-sdk
+        JAVA_OPTS: -Xmx2048m
+    
+    - name: Show build output
+      if: always()
+      run: |
+        echo "=== Build output ==="
+        ls -la app/build/outputs/apk/ 2>/dev/null || echo "No APK directory"
+        ls -la app/build/outputs/apk/debug/ 2>/dev/null || echo "No debug APK"
     
     - name: Upload Debug APK
       uses: actions/upload-artifact@v4
