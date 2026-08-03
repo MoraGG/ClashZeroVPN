@@ -115,13 +115,15 @@ class ClashEngine : VpnEngine {
                 File(clashHome, it).apply { if (!exists()) mkdirs() }
             }
             val resolvedConfigPath = explicitConfigPath
-                .takeUnless { it.isNullOrEmpty() }
-                ?: _configPath.takeUnless { it.isNullOrEmpty() }
-            val configFile = resolvedConfigPath
                 ?.takeIf { it.isNotEmpty() }
-                ?.let { File(it).takeIf { f -> f.exists() } }
-                ?: writeDefaultClashConfig(ctx)
-            Log.d(TAG, "  SubStep 3 OK: home=${clashHome.absolutePath}, config=${configFile.absolutePath}")
+                ?.let { File(it) }
+                ?.let { if (it.isDirectory()) it else it.parentFile }
+                ?: File(ctx.filesDir, "clash").also { it.mkdirs() }
+            val configFile = resolvedConfigPath.resolve("config.yaml")
+            if (!configFile.exists()) {
+                writeDefaultClashConfig(ctx, configFile)
+            }
+            Log.d(TAG, "  SubStep 3 OK: home=${clashHome.absolutePath}, configDir=${resolvedConfigPath.absolutePath}")
 
             Log.d(TAG, "  SubStep 4: Bridge.nativeLoad()")
             val loadFuture = CompletableDeferred<Unit>()
@@ -211,16 +213,14 @@ class ClashEngine : VpnEngine {
 
     override fun isRunning(): Boolean = running
 
-    private fun writeDefaultClashConfig(context: Context): File {
-        val dir = File(context.filesDir, "clash")
-        if (!dir.exists()) dir.mkdirs()
-        val file = File(dir, "config.yaml")
-        if (file.exists()) return file
+    private fun writeDefaultClashConfig(context: Context, outputFile: File): File {
+        outputFile.parentFile?.mkdirs()
+        if (outputFile.exists()) return outputFile
         runCatching {
             context.assets.open("default_clash_config.yaml").use { input ->
-                file.outputStream().use { out -> input.copyTo(out) }
+                outputFile.outputStream().use { out -> input.copyTo(out) }
             }
-        }.getOrNull() ?: file.writeText(
+        }.getOrNull() ?: outputFile.writeText(
             """
 mixed-port: 7890
 allow-lan: false
@@ -247,6 +247,6 @@ rules:
   - MATCH,DIRECT
             """.trimIndent()
         )
-        return file
+        return outputFile
     }
 }
