@@ -60,58 +60,67 @@ class CZVpnService : VpnService() {
 
     private fun startInternal() {
         if (vpnJob != null && vpnJob?.isActive == true) return
+        Log.d(TAG, "=== startInternal BEGIN ===")
         _state.value = VpnState.CONNECTING
-        profile = ProfileStore(this).load()
 
         try {
+            Log.d(TAG, "Step 1: ProfileStore.load()")
+            profile = ProfileStore(this).load()
+            Log.d(TAG, "Step 1 OK: clashConfigPath=${profile.clashConfigPath}")
+
+            Log.d(TAG, "Step 2: establishTun()")
             val fd = establishTun(profile)
             tunFd = fd
+            Log.d(TAG, "Step 2 OK: TUN fd=${fd.fd}")
 
-            // 初始化 Clash 引擎
+            Log.d(TAG, "Step 3: ClashEngine() init")
             clashEngine = ClashEngine().apply {
                 onOutboundPacket = { writeToTun(it) }
             }
+            Log.d(TAG, "Step 3 OK")
 
-            // 初始化 ZeroTier 引擎
+            Log.d(TAG, "Step 4: ZeroTierEngine() init")
             zeroTierEngine = ZeroTierEngine().apply {
                 onOutboundPacket = { writeToTun(it) }
             }
+            Log.d(TAG, "Step 4 OK")
 
             lastClashEngine = clashEngine
             lastZeroTierEngine = zeroTierEngine
 
-            // 初始化数据包分发器
+            Log.d(TAG, "Step 5: PacketDispatcher init")
             dispatcher = PacketDispatcher(
                 clashEngine = clashEngine,
                 zeroTierEngine = zeroTierEngine,
                 ztSubnets = profile.ztSubnets
             )
+            Log.d(TAG, "Step 5 OK")
 
-            // 初始化 Clash 配置
+            Log.d(TAG, "Step 6: clashEngine.init()")
             clashEngine.init(
                 filesDir.absolutePath,
                 profile.clashConfigPath,
                 profile.mihomoPort
             )
+            Log.d(TAG, "Step 6 OK")
 
-            // 初始化 ZeroTier
             if (profile.zeroTierNetworkId.isNotEmpty()) {
+                Log.d(TAG, "Step 7: zeroTierEngine.init()")
                 zeroTierEngine.init(profile.zeroTierNetworkId, filesDir.absolutePath)
+                Log.d(TAG, "Step 7 OK")
             }
 
-            // 启动 Clash（用 try-catch 防止 native 库问题导致崩溃）
+            Log.d(TAG, "Step 8: clashEngine.start()")
             try {
-                Log.d(TAG, "Starting Clash engine...")
                 clashEngine.start()
-                Log.d(TAG, "Clash engine started OK")
+                Log.d(TAG, "Step 8 OK - Clash engine started")
             } catch (e: Throwable) {
-                Log.e(TAG, "Clash engine start FAILED: ${e.message}", e)
+                Log.e(TAG, "Step 8 FAILED: ${e.message}", e)
                 _state.value = VpnState.FAILED
                 stopSelf()
                 return
             }
 
-            // 启动 ZeroTier
             if (profile.zeroTierNetworkId.isNotEmpty()) {
                 scope.launch {
                     try {
@@ -127,14 +136,13 @@ class CZVpnService : VpnService() {
             scope.launch { trafficTick() }
 
             Log.i(TAG, "VPN started successfully")
-            Log.d(TAG, "TUN FD: ${fd.fd}, MTU: ${profile.tunMtu}")
-            Log.d(TAG, "DNS Servers: ${profile.dns1}, ${profile.dns2}")
 
         } catch (t: Throwable) {
-            Log.e(TAG, "VPN start failed", t)
+            Log.e(TAG, "startInternal FAILED at some step: ${t.message}", t)
             _state.value = VpnState.FAILED
             stopSelf()
         }
+        Log.d(TAG, "=== startInternal END ===")
     }
 
     private fun stopInternal() {
@@ -253,46 +261,34 @@ class CZVpnService : VpnService() {
      * 4. 排除 VPN 应用自身避免循环
      */
     private fun establishTun(profile: VpnProfile): android.os.ParcelFileDescriptor {
+        Log.d(TAG, "  TunBuilder: session=${getString(com.clashzerovpn.R.string.app_name)}")
+        Log.d(TAG, "  TunBuilder: address=${profile.vpnAddr}/${profile.vpnPrefix}, mtu=${profile.tunMtu}")
+
         val builder = Builder()
             .setSession(getString(com.clashzerovpn.R.string.app_name))
             .addAddress(profile.vpnAddr, profile.vpnPrefix)
-            .setMtu(profile.tunMtu.coerceIn(1280, 1500)) // MTU 范围限制
+            .setMtu(profile.tunMtu.coerceIn(1280, 1500))
             .setBlocking(true)
 
-        // 配置 Intent
         configIntent()?.let { builder.setConfigureIntent(it) }
 
-        // 添加全流量路由 - 关键！否则流量不会走 VPN
         builder.addRoute("0.0.0.0", 0)
         builder.addRoute("::", 0)
-
-        // 添加 DNS 服务器 - 使用 Clash 的 Fake-IP 地址
-        // 这是最重要的配置，决定了 DNS 解析是否工作
-        builder.addDnsServer("198.18.0.1") // Clash Fake-IP DNS
+        builder.addDnsServer("198.18.0.1")
         builder.addDnsServer(profile.dns1)
         if (profile.dns2 != profile.dns1) {
             builder.addDnsServer(profile.dns2)
         }
-
-        // 排除 VPN 应用自身，避免流量循环
-        // 这是防止 VPN 连接后无法上网的关键配置
         builder.addDisallowedApplication(packageName)
-
-        // 尝试添加搜索域（可选）
         builder.addSearchDomain("local")
 
-        Log.d(TAG, "Establishing TUN with settings:")
-        Log.d(TAG, "  Address: ${profile.vpnAddr}/${profile.vpnPrefix}")
-        Log.d(TAG, "  MTU: ${profile.tunMtu}")
-        Log.d(TAG, "  DNS: 198.18.0.1, ${profile.dns1}, ${profile.dns2}")
-        Log.d(TAG, "  Routes: 0.0.0.0/0, ::/0")
-        Log.d(TAG, "  Excluded App: $packageName")
+        Log.d(TAG, "  TunBuilder: routes=0.0.0.0/0, DNS=198.18.0.1,${profile.dns1},${profile.dns2}")
+        Log.d(TAG, "  TunBuilder: excludedApp=$packageName")
 
         val fd = builder.establish()
-            ?: throw IllegalStateException("TUN 建立失败")
+            ?: throw IllegalStateException("TUN establish() returned null")
 
-        Log.i(TAG, "TUN interface established, fd=${fd.fd}")
-
+        Log.i(TAG, "TUN established: fd=${fd.fd}")
         return fd
     }
 

@@ -92,20 +92,23 @@ class ClashEngine : VpnEngine {
         explicitConfigPath: String?,
         callback: (ByteArray) -> Unit
     ): Boolean {
-        return try {
-            // 1) 确保 Bridge 初始化（加载 libbridge.so + nativeInit）
+        Log.d(TAG, "ClashEngine.startInternal BEGIN")
+        try {
+            Log.d(TAG, "  SubStep 1: Bridge.ensureInitialized()")
             Bridge.ensureInitialized()
+            Log.d(TAG, "  SubStep 1 OK")
 
-            // 2) 创建 socketpair（双向 fd）— Android 公开 API，API 19+
+            Log.d(TAG, "  SubStep 2: ParcelFileDescriptor.createReliableSocketPair()")
             val pfds = ParcelFileDescriptor.createReliableSocketPair()
             pairPfd = pfds
             readFis = FileInputStream(pfds[1].fileDescriptor)
             writeFos = FileOutputStream(pfds[1].fileDescriptor)
+            Log.d(TAG, "  SubStep 2 OK: pfds=${pfds[0].fd},${pfds[1].fd}")
 
-            // 3) 准备 clash home + config
+            Log.d(TAG, "  SubStep 3: preparing clash home")
             val ctx: android.content.Context = context
                 ?: com.github.kr328.clash.common.Global.application
-                ?: throw IllegalStateException("Global.application == null: CZApplication.onCreate() 未被调用，请确认 AndroidManifest.xml 注册了 CZApplication")
+                ?: throw IllegalStateException("Global.application == null: CZApplication.onCreate() not called")
             val clashHome = File(_homeDir ?: (ctx.filesDir.absolutePath + File.separator + "clash"))
                 .apply { if (!exists()) mkdirs() }
             listOf("cache", "logs", "profiles").forEach {
@@ -118,19 +121,19 @@ class ClashEngine : VpnEngine {
                 ?.takeIf { it.isNotEmpty() }
                 ?.let { File(it).takeIf { f -> f.exists() } }
                 ?: writeDefaultClashConfig(ctx)
+            Log.d(TAG, "  SubStep 3 OK: home=${clashHome.absolutePath}, config=${configFile.absolutePath}")
 
-            Log.d(TAG, "Clash home=${clashHome.absolutePath}, config=${configFile.absolutePath}")
-
-            // 4) 加载配置
+            Log.d(TAG, "  SubStep 4: Bridge.nativeLoad()")
             val loadFuture = CompletableDeferred<Unit>()
             Bridge.nativeLoad(loadFuture, configFile.absolutePath)
             scope.launch {
                 val ok = withTimeoutOrNull(30_000) { loadFuture.await() }
-                if (ok == null) Log.w(TAG, "nativeLoad timeout, continue anyway")
-                else Log.d(TAG, "nativeLoad completed")
+                if (ok == null) Log.w(TAG, "  SubStep 4: nativeLoad TIMEOUT")
+                else Log.d(TAG, "  SubStep 4: nativeLoad OK")
             }
+            Log.d(TAG, "  SubStep 4 launched async")
 
-            // 5) 启动 Mihomo Tun 栈（把 pfd[0] 给 Mihomo 当作 TUN）
+            Log.d(TAG, "  SubStep 5: Bridge.nativeStartTun()")
             val stack = "gvisor"
             val gateway = "198.18.0.1"
             val portal = "198.18.0.2"
@@ -142,22 +145,17 @@ class ClashEngine : VpnEngine {
                 portal = portal,
                 dns = dns,
                 cb = object : TunInterface {
-                    override fun markSocket(fd: Int) {
-                        // 如果需要可以 VpnService.protect(fd) 防自环；此处默认不做
-                    }
-                    override fun querySocketUid(
-                        protocol: Int,
-                        source: String,
-                        target: String
-                    ): Int = -1
+                    override fun markSocket(fd: Int) {}
+                    override fun querySocketUid(protocol: Int, source: String, target: String): Int = -1
                 }
             )
+            Log.d(TAG, "  SubStep 5 OK")
 
-            // 6) 启动 Mihomo → 系统 TUN 回包协程
+            Log.d(TAG, "  SubStep 6: starting loopback reader coroutine")
             loopbackJob = scope.launch(Dispatchers.IO) {
                 val buf = ByteArray(65535)
                 val fis = readFis ?: return@launch
-                Log.d(TAG, "loopback reader started")
+                Log.d(TAG, "  loopback reader started")
                 try {
                     while (running) {
                         val n = fis.read(buf)
@@ -167,17 +165,18 @@ class ClashEngine : VpnEngine {
                     }
                 } catch (_: Exception) {
                 } finally {
-                    Log.d(TAG, "loopback reader ended")
+                    Log.d(TAG, "  loopback reader ended")
                 }
             }
+            Log.d(TAG, "  SubStep 6 OK")
 
             running = true
             _isReadyFlow.value = true
-            Log.i(TAG, "Clash engine started (real Mihomo kernel via socketpair)")
-            true
+            Log.i(TAG, "ClashEngine.startInternal OK")
+            return true
         } catch (e: Throwable) {
-            Log.e(TAG, "Failed to start Clash engine", e)
-            throw e  // 传播错误，不回退
+            Log.e(TAG, "ClashEngine.startInternal FAILED: ${e.message}", e)
+            throw e
         }
     }
 
