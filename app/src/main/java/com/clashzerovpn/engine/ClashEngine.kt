@@ -137,7 +137,7 @@ class ClashEngine : VpnEngine {
             val stack = "gvisor"
             val gateway = "198.18.0.1/32"        // 必须带 CIDR 后缀
             val portal = "198.18.0.2/32"         // 必须带 CIDR 后缀
-            val dns = "198.18.0.1/32,1.1.1.1/32,8.8.8.8/32,223.5.5.5/32"
+            val dns = "198.18.0.1,1.1.1.1,8.8.8.8,223.5.5.5"
             Bridge.nativeStartTun(
                 fd = pfds[0].fd,
                 stack = stack,
