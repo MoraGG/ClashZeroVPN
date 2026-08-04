@@ -126,6 +126,22 @@ class ClashEngine : VpnEngine {
             } else if (!clashHomeConfig.exists()) {
                 writeDefaultClashConfig(ctx, clashHomeConfig)
             }
+
+            // 内置 geoip.metadb，避免 nativeLoad 时从 GitHub 下载（国内网络不通）
+            val geoipFile = File(clashHome, "geoip.metadb")
+            if (!geoipFile.exists()) {
+                try {
+                    ctx.assets.open("geoip.metadb").use { input ->
+                        geoipFile.outputStream().use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                    Log.d(TAG, "  geoip.metadb copied from assets to ${geoipFile.absolutePath}")
+                } catch (e: Throwable) {
+                    Log.w(TAG, "  geoip.metadb not found in assets, will download from GitHub: ${e.message}")
+                }
+            }
+
             Log.d(TAG, "  SubStep 3 OK: home=${clashHome.absolutePath}, configDir=${resolvedConfigPath.absolutePath}, clashHomeConfig=${clashHomeConfig.absolutePath}")
 
             Log.d(TAG, "  SubStep 4: Bridge.nativeLoad()")
